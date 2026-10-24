@@ -1,0 +1,812 @@
+// ============================================================
+// CONFIGURATION — add one entry per route here.
+// Each route gets its own Gmail label, its own Drive folder, and TWO template
+// tabs in the trip log sheet, named after the route code + run:
+//   "R1 AM" and "R1 PM"  (route code, a space, then AM or PM)
+// The individuals for a route/run are read from the "Member's Printed Name"
+// column (B) of that tab, so to add or remove someone, edit the names on the
+// tab - nothing to change here. The scheduled pickup time (column D) is also
+// kept on that tab, so the form no longer asks for it.
+// ============================================================
+var ROUTES = [
+  {
+    name: "EX",
+    gmailLabel: "Example",
+    driveFolderId: "ewtewterterwtygfdhgeay"
+];
+
+// FINAL AM / PM trip log PDFs (one email per route per run) go ONLY to this address.
+// Individual form submissions are NOT emailed.
+var SUBMISSION_RECIPIENT = "triplog@onediversity.org";
+// ALL alerts (daily checks, morning reminders, end-of-week report) go to this address.
+var ALERT_RECIPIENTS = "cwalger@onediversity.org";
+var LOGS_PER_DAY = 2; // one AM run + one PM run
+// Hour (24h, script timezone). Checks that run BEFORE this hour only expect the AM run;
+// checks at/after it expect both AM and PM. (AM is done by 11AM, PM by 6PM.)
+var PM_EXPECTED_AFTER_HOUR = 15;
+
+var SHEET_ID = "1rwm-GOuOz6auYJTLpAQwnowIUbhM77HvZN_zzaynwSI";
+var DAY_TAB_KEEP_DAYS = 7;
+
+// Cursive font used for the driver's signature on the sheet
+var SIGNATURE_FONT = "Pacifico";
+var SIGNATURE_FONT_SIZE = 14;
+
+// The Pickup departure time is the Pick Up time plus a random number of
+// minutes in this range (same function the residential script uses).
+var DEPARTURE_MIN_MINUTES = 1;
+var DEPARTURE_MAX_MINUTES = 3;
+
+/**
+ * "3:05 PM" + a random minMin..maxMin minutes -> e.g. "3:08 PM".
+ * Handles the AM/PM flip and midnight rollover.
+ */
+function addRandomMinutes_(timeStr, minMin, maxMin) {
+  var m = /^(\d{1,2}):(\d{2})\s*(AM|PM)$/i.exec(String(timeStr).trim());
+  if (!m) throw new Error("Invalid pickup time: " + timeStr);
+  var h = (+m[1] % 12) + (m[3].toUpperCase() === "PM" ? 12 : 0);
+  var total = (h * 60 + (+m[2]) + minMin + Math.floor(Math.random() * (maxMin - minMin + 1))) % (24 * 60);
+  var hh = Math.floor(total / 60), mm = total % 60;
+  return ((hh % 12) || 12) + ":" + String(mm).padStart(2, "0") + " " + (hh >= 12 ? "PM" : "AM");
+}
+
+// ============================================================
+// SAVE EMAIL ATTACHMENTS TO DRIVE (per route)
+//
+// For each route: finds UNREAD emails under its Gmail label that have an
+// attachment, saves the attachments into that route's Drive folder
+// (Year > Month > Week > Day, by the date the email was SENT), then marks
+// the email read.
+//
+// Run via a time-based trigger:
+// Apps Script editor > Triggers > Add Trigger > saveLabelAttachmentsToDrive
+// > Time-driven.
+// ============================================================
+function saveLabelAttachmentsToDrive() {
+  for (var r = 0; r < ROUTES.length; r++) {
+    saveAttachmentsForRoute_(ROUTES[r]);
+  }
+}
+
+function saveAttachmentsForRoute_(route) {
+  var rootFolder = DriveApp.getFolderById(route.driveFolderId);
+
+  // Gmail requires spaces replaced with hyphens in label search queries
+  var labelForSearch = route.gmailLabel.replace(/ /g, "-");
+  var searchQuery = "label:" + labelForSearch + " has:attachment is:unread";
+  Logger.log("[" + route.name + "] Search query: " + searchQuery);
+
+  var threads = GmailApp.search(searchQuery);
+  Logger.log("[" + route.name + "] Threads found: " + threads.length);
+
+  if (threads.length === 0) {
+    Logger.log("[" + route.name + "] No unread threads with attachments found. Done.");
+    return;
+  }
+
+  for (var i = 0; i < threads.length; i++) {
+    var messages = threads[i].getMessages();
+    Logger.log("[" + route.name + "] Thread " + i + " has " + messages.length + " message(s)");
+
+    for (var j = 0; j < messages.length; j++) {
+      var message = messages[j];
+
+      if (!message.isUnread()) {
+        Logger.log("[" + route.name + "] Skipping already-read message from: " + message.getDate());
+        continue;
+      }
+
+      // One bad message can't stop the rest; it stays unread and is retried next run.
+      try {
+        var sentDate = message.getDate();
+        Logger.log("[" + route.name + "] Processing message from: " + sentDate);
+
+        var dayFolder = getOrCreateDayFolder(
+          getOrCreateWeekFolder(
+            getOrCreateMonthFolder(getOrCreateYearFolder(rootFolder, sentDate), sentDate),
+            sentDate),
+          sentDate);
+
+        var attachments = message.getAttachments();
+        Logger.log("[" + route.name + "] Attachments found: " + attachments.length);
+
+        for (var k = 0; k < attachments.length; k++) {
+          dayFolder.createFile(attachments[k]);
+          Logger.log("[" + route.name + "] Saved: " + attachments[k].getName() + " to " + dayFolder.getName());
+        }
+
+        message.markRead();
+      } catch (err) {
+        Logger.log("[" + route.name + "] ERROR processing message from " + message.getDate() + ": " + err.message);
+      }
+    }
+  }
+}
+
+// ============================================================
+// WEB APP — one page (Index.html) with a Pick-Up / Drop-Off chooser.
+//
+// HOW IT WORKS
+// - Each route has TWO template tabs: "R1 AM" and "R1 PM". After the route and
+//   AM/PM are chosen, the individuals list is read from that tab. The templates
+//   are never modified.
+// - Each route gets TWO files a day per driver: one for the AM run, one for the PM run.
+// - The first pick-up for a route + date + run + driver license makes a tab named like
+//   d_R1_2026-10-09_AM_5678 (a copy of the route's "R1 AM" / "R1 PM" template tab).
+// - Every later pick-up by that driver fills in that SAME tab (pick-up writes
+//   columns C, E and F, drop-off writes G-H, on the individual's row). Column D
+//   (scheduled time) comes from the template. Column F (pickup departure) is the
+//   Pick Up time plus a random 1-3 minutes. A drop-off goes to the tab where that
+//   individual was picked up.
+// - After each submission the tab is exported and that driver's single PDF
+//   (2026-10-09_R1_AM_5678_Trip_Log.pdf) in the Drive day folder is replaced.
+//   Nothing is emailed per submission.
+// - sendFinalAmLogs (trigger ~11AM) and sendFinalPmLogs (trigger ~6PM) email the
+//   finished PDFs for that run, one email per route, to SUBMISSION_RECIPIENT.
+// - Submitting again for the same individual and same type corrects that row.
+// - Day tabs older than 7 days are deleted automatically (PDFs stay in Drive).
+// ============================================================
+function doGet() {
+  return HtmlService.createHtmlOutputFromFile("Index")
+    .setTitle("MTM Trip Log")
+    .addMetaTag("viewport", "width=device-width, initial-scale=1");
+}
+
+function getRouteList() {
+  return ROUTES.map(function (h) {
+    return { code: h.name, label: h.gmailLabel.replace(/\s*Trip Logs$/i, "") };
+  });
+}
+
+/** Names for the individual dropdown: read from column B of the "R1 AM" / "R1 PM" tab. */
+function getRouteMembers(code, session) {
+  var route = ROUTES.filter(function (h) { return h.name === code; })[0];
+  if (!route) throw new Error("Unknown route: " + code);
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+  return readRoster_(getTemplateSheet_(ss, route, session));
+}
+
+/** Names in the Member's Printed Name column (B) of the trip rows, top to bottom. */
+function readRoster_(sheet) {
+  var L = locateLayout_(sheet);
+  var vals = sheet.getRange(L.firstTrip, 2, L.lastTrip - L.firstTrip + 1, 1).getValues();
+  return vals.map(function (v) { return String(v[0]).trim(); }).filter(function (n) { return n; });
+}
+
+/** Pick-up: license, individual, pick-up time, driver certification. */
+function submitPickUp(d) {
+  ["route", "serviceDate", "license", "driverName", "driverSignature", "ampm", "pickup"].forEach(function (k) {
+    if (!String(d[k] || "").trim()) throw new Error("Missing field: " + k);
+  });
+  d.license = String(d.license).trim().toUpperCase();
+  if (!/^[A-Z][0-9]{8}$/.test(d.license)) {
+    throw new Error("The driver's license number must be 1 letter followed by 8 numbers (9 characters).");
+  }
+  return fileTripPdf_(d, "PickUp", d.ampm, function (sheet, L, rowsAvail, ind) {
+    var row = findTripRow_(sheet, L, rowsAvail, ind, "pickup");
+    // C = AM/PM, E = pick up time, F = pick up time + random minutes.
+    // D (scheduled time) is left as it is on the "R1 AM"/"R1 PM" tab.
+    sheet.getRange(row, 3).setNumberFormat("@").setValue(d.ampm);
+    sheet.getRange(row, 5, 1, 2).setNumberFormat("@")
+      .setValues([[d.pickup,
+        addRandomMinutes_(d.pickup, DEPARTURE_MIN_MINUTES, DEPARTURE_MAX_MINUTES)]]);
+    sheet.getRange(L.license, 2).setNumberFormat("@").setValue(d.license);
+
+    // Driver's signature: the label stays normal, the typed name is cursive
+    if (L.sig) {
+      var full = L.sigLabel + " " + d.driverSignature;
+      var cursive = SpreadsheetApp.newTextStyle()
+        .setFontFamily(SIGNATURE_FONT)
+        .setFontSize(SIGNATURE_FONT_SIZE)
+        .build();
+      var rich = SpreadsheetApp.newRichTextValue()
+        .setText(full)
+        .setTextStyle(L.sigLabel.length + 1, full.length, cursive)
+        .build();
+      sheet.getRange(L.sig, 1).setRichTextValue(rich);
+    }
+    if (L.pname) sheet.getRange(L.pname, 1).setValue(L.pnameLabel + " " + d.driverName);
+  });
+}
+
+/** Drop-off: individual, drop-off time, attendant signature (plus which run it belongs to). */
+function submitDropOff(d) {
+  ["route", "serviceDate", "dropoff", "signature", "session"].forEach(function (k) {
+    if (!String(d[k] || "").trim()) throw new Error("Missing field: " + k);
+  });
+  return fileTripPdf_(d, "DropOff", d.session, function (sheet, L, rowsAvail, ind) {
+    var row = findTripRow_(sheet, L, rowsAvail, ind, "dropoff");
+    sheet.getRange(row, 7, 1, 2).setNumberFormat("@").setValues([[d.dropoff, d.signature]]);
+    // Attendant signature (column H) in cursive; the drop-off time (column G) stays normal
+    sheet.getRange(row, 8).setFontFamily(SIGNATURE_FONT).setFontSize(SIGNATURE_FONT_SIZE);
+  });
+}
+
+/**
+ * Row to write on the run's tab.
+ * - Tab has names in column B: the individual's own row (re-submitting edits it).
+ * - Tab has no names: pick-up takes the next empty row; drop-off takes the first
+ *   row that has a pick-up but no drop-off yet (else the next empty row).
+ */
+function findTripRow_(sheet, L, rowsAvail, ind, kind) {
+  var v = sheet.getRange(L.firstTrip, 2, rowsAvail, 6).getValues(); // B..G
+  var i;
+  if (ind) {
+    for (i = 0; i < v.length; i++) {
+      if (String(v[i][0]).trim() === ind) return L.firstTrip + i;
+    }
+    throw new Error("'" + ind + "' is not listed on this route's tab.");
+  }
+  if (kind === "dropoff") {
+    for (i = 0; i < v.length; i++) {
+      if (String(v[i][1]).trim() && !String(v[i][5]).trim()) return L.firstTrip + i;
+    }
+  }
+  for (i = 0; i < v.length; i++) {
+    if (!String(v[i][1]).trim() && !String(v[i][5]).trim()) return L.firstTrip + i;
+  }
+  throw new Error("No free trip row on the tab.");
+}
+
+// ------------------------------------------------------------
+// Run tabs: one per route + date + run + driver (split routes get several).
+// ------------------------------------------------------------
+function runBaseName_(route, serviceDate, session) {
+  return "d_" + route.name + "_" + formatDatePrefix(serviceDate) + "_" + session;
+}
+
+/** Every tab for this route + date + run (one per driver on a split route). */
+function listRunTabs_(ss, base) {
+  return ss.getSheets().filter(function (s) {
+    var n = s.getName();
+    return n === base || n.indexOf(base + "_") === 0;
+  });
+}
+
+function readTabLicense_(sheet) {
+  var L = locateLayout_(sheet);
+  return String(sheet.getRange(L.license, 2).getValue() || "").trim().toUpperCase();
+}
+
+function uniqueTabName_(ss, name) {
+  var n = name, k = 2;
+  while (ss.getSheetByName(n)) n = name + "-" + k++;
+  return n;
+}
+
+function createRunTab_(ss, route, session, dateStr, name) {
+  var sheet = getTemplateSheet_(ss, route, session).copyTo(ss).setName(name);
+  var L = locateLayout_(sheet);
+  sheet.getRange(L.date, 2).setNumberFormat("@").setValue(dateStr);
+  return sheet;
+}
+
+/** Pick-up: the tab that belongs to THIS driver's license; created if it's their first pick-up of the run. */
+function getPickUpTab_(ss, route, serviceDate, dateStr, session, license) {
+  var base = runBaseName_(route, serviceDate, session);
+  var tabs = listRunTabs_(ss, base), i;
+  for (i = 0; i < tabs.length; i++) {
+    if (readTabLicense_(tabs[i]) === license) return tabs[i];
+  }
+  var name = uniqueTabName_(ss, base + "_" + license.slice(-4));
+  // A drop-off that came in before any pick-up left a tab with no driver; claim it.
+  for (i = 0; i < tabs.length; i++) {
+    if (!readTabLicense_(tabs[i])) return tabs[i].setName(name);
+  }
+  return createRunTab_(ss, route, session, dateStr, name);
+}
+
+/** Drop-off: the tab where this individual was picked up (whichever driver that was). */
+function getDropOffTab_(ss, route, serviceDate, dateStr, session, ind) {
+  var base = runBaseName_(route, serviceDate, session);
+  var tabs = listRunTabs_(ss, base), i;
+  for (i = 0; i < tabs.length; i++) if (rowHasPickUp_(tabs[i], ind, true)) return tabs[i];   // picked up, not dropped yet
+  for (i = 0; i < tabs.length; i++) if (rowHasPickUp_(tabs[i], ind, false)) return tabs[i];  // correcting a drop-off
+  if (tabs.length) return tabs[0];
+  return createRunTab_(ss, route, session, dateStr, base);
+}
+
+function rowHasPickUp_(sheet, ind, openOnly) {
+  var L = locateLayout_(sheet);
+  var v = sheet.getRange(L.firstTrip, 2, L.lastTrip - L.firstTrip + 1, 6).getValues(); // B..G
+  for (var i = 0; i < v.length; i++) {
+    if (ind && String(v[i][0]).trim() !== ind) continue;
+    if (String(v[i][1]).trim() && (!openOnly || !String(v[i][5]).trim())) return true;
+  }
+  return false;
+}
+
+/** Removes run tabs older than DAY_TAB_KEEP_DAYS. The PDFs in Drive are not touched. */
+function cleanupOldDayTabs_(ss) {
+  var cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - DAY_TAB_KEEP_DAYS);
+  cutoff.setHours(0, 0, 0, 0);
+  ss.getSheets().forEach(function (s) {
+    var m = /^d_[^_]+_(\d{4})-(\d{2})-(\d{2})_(AM|PM)(_[A-Z0-9]{4}(-\d+)?)?$/.exec(s.getName());
+    if (!m) return;
+    var dt = new Date(+m[1], +m[2] - 1, +m[3], 12, 0, 0);
+    if (dt < cutoff && ss.getSheets().length > 1) ss.deleteSheet(s);
+  });
+}
+
+/**
+ * Shared: fill the run's tab (via fillFn), export it as a PDF, replace that
+ * tab's PDF in Drive. No email is sent here (see sendFinalRunLogs_).
+ */
+function fileTripPdf_(d, kind, sessionIn, fillFn) {
+  var session = String(sessionIn || "").trim().toUpperCase();
+  if (session !== "AM" && session !== "PM") throw new Error("Choose AM or PM.");
+
+  var route = ROUTES.filter(function (h) { return h.name === d.route; })[0];
+  if (!route) throw new Error("Unknown route: " + d.route);
+
+  var ind = String((d.individuals || [])[0] || "").trim();
+  var serviceDate = parseServiceDate_(d.serviceDate);
+  var ss = SpreadsheetApp.openById(SHEET_ID);
+
+  // Two people submitting at once must not overwrite each other.
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var sheet = (kind === "PickUp")
+      ? getPickUpTab_(ss, route, serviceDate, d.serviceDate, session, d.license)
+      : getDropOffTab_(ss, route, serviceDate, d.serviceDate, session, ind);
+    var roster = readRoster_(sheet);
+    if (roster.length) {
+      if (!ind) throw new Error("Select an individual.");
+      if (roster.indexOf(ind) === -1) throw new Error("'" + ind + "' is not listed for route " + route.name + ".");
+    }
+    var L = locateLayout_(sheet);
+    var rowsAvail = L.lastTrip - L.firstTrip + 1;
+
+    fillFn(sheet, L, rowsAvail, ind);
+    SpreadsheetApp.flush();
+
+    var url = "https://docs.google.com/spreadsheets/d/" + SHEET_ID + "/export?format=pdf" +
+      "&gid=" + sheet.getSheetId() + "&portrait=false&fitw=true&size=letter&gridlines=false";
+    var res = UrlFetchApp.fetch(url, { headers: { Authorization: "Bearer " + ScriptApp.getOAuthToken() } });
+    var lic = readTabLicense_(sheet);
+    var pdfName = formatDatePrefix(serviceDate) + "_" + route.name + "_" + session +
+      (lic ? "_" + lic.slice(-4) : "") + "_Trip_Log.pdf";
+    var root = DriveApp.getFolderById(route.driveFolderId);
+    var dayFolder = getOrCreateDayFolder(
+      getOrCreateWeekFolder(
+        getOrCreateMonthFolder(getOrCreateYearFolder(root, serviceDate), serviceDate),
+        serviceDate),
+      serviceDate);
+
+    // One file per driver per run: replace the previous version of this PDF.
+    var old = dayFolder.getFilesByName(pdfName);
+    while (old.hasNext()) old.next().setTrashed(true);
+    var pdfBlob = res.getBlob().setName(pdfName);
+    var file = dayFolder.createFile(pdfBlob);
+
+    try { cleanupOldDayTabs_(ss); } catch (e) { Logger.log("Tab cleanup failed: " + e.message); }
+
+    return { ok: true, file: pdfName, url: file.getUrl() };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// ============================================================
+// FINAL AM / PM EMAILS
+//
+// Sends the finished PDFs for ONE run (AM or PM) of today, one email per route,
+// to SUBMISSION_RECIPIENT. Only the files already sitting in Drive are sent, so
+// the supervisors never see in-progress versions.
+//
+// Triggers (weekdays; Apps Script editor > Triggers > Add Trigger):
+//   sendFinalAmLogs  > Day timer > 11am - 12pm   (AM is done by 11AM)
+//   sendFinalPmLogs  > Day timer > 6pm - 7pm     (PM is done by 6PM)
+// ============================================================
+function sendFinalAmLogs() { sendFinalRunLogs_("AM"); }
+function sendFinalPmLogs() { sendFinalRunLogs_("PM"); }
+
+function sendFinalRunLogs_(session) {
+  var today = new Date();
+  if (today.getDay() === 0 || today.getDay() === 6) {
+    Logger.log("Weekend - no final " + session + " send needed.");
+    return;
+  }
+  var dateLabel = Utilities.formatDate(today, Session.getScriptTimeZone(), "EEEE, MMM d, yyyy");
+  for (var h = 0; h < ROUTES.length; h++) {
+    var route = ROUTES[h];
+    try {
+      var root = DriveApp.getFolderById(route.driveFolderId);
+      var folder = getExistingDayFolder_(root, today);
+      var blobs = [];
+      if (folder) {
+        var re = runFileRegex_(route.name, session);
+        var it = folder.getFiles();
+        while (it.hasNext()) {
+          var f = it.next();
+          if (re.test(f.getName())) blobs.push(f.getBlob().setName(f.getName()));
+        }
+      }
+      if (!blobs.length) {
+        Logger.log("[" + route.name + "] No " + session + " PDFs to send.");
+        continue;
+      }
+      GmailApp.sendEmail(SUBMISSION_RECIPIENT,
+        "[" + route.name + "] " + session + " Trip Log - " + dateLabel,
+        "Final " + session + " trip log for route " + route.name + " on " + dateLabel + ".\n" +
+        "Attached: " + blobs.length + " file(s).",
+        { attachments: blobs });
+      Logger.log("[" + route.name + "] Sent final " + session + " log (" + blobs.length + " file(s)).");
+    } catch (err) {
+      Logger.log("[" + route.name + "] Final " + session + " send failed: " + err.message);
+    }
+  }
+}
+
+/** Matches the form-generated PDF names, e.g. 2026-10-09_R1_AM_5678_Trip_Log.pdf (license suffix optional). */
+function runFileRegex_(routeName, session) {
+  return new RegExp("^\\d{4}-\\d{2}-\\d{2}_" + routeName + "_" + session + "(_[A-Z0-9]{4})?_Trip_Log\\.pdf$");
+}
+
+/**
+ * Distinct runs filed for a route in one day folder.
+ * Returns { sessions: {AM:bool, PM:bool}, other: n }.
+ * "other" = files that are not form-generated (e.g. saved email attachments);
+ * their AM/PM is unknown, so each counts as one run toward a missing slot.
+ */
+function getRunsInFolder_(folder, routeName) {
+  var res = { sessions: { AM: false, PM: false }, other: 0 };
+  if (!folder) return res;
+  var reAM = runFileRegex_(routeName, "AM"), rePM = runFileRegex_(routeName, "PM");
+  var it = folder.getFiles();
+  while (it.hasNext()) {
+    var n = it.next().getName();
+    if (reAM.test(n)) res.sessions.AM = true;
+    else if (rePM.test(n)) res.sessions.PM = true;
+    else res.other++;
+  }
+  return res;
+}
+
+/** How many of the needed runs ("AM", "PM") are covered, and which are missing. */
+function evaluateRuns_(runs, needed) {
+  var missing = needed.filter(function (s) { return !runs.sessions[s]; });
+  var credit = Math.min(runs.other, missing.length);
+  var stillMissing = missing.slice(credit);
+  return { found: needed.length - stillMissing.length, missing: stillMissing };
+}
+
+/** Turns the form's "MM/DD/YYYY" into a Date at noon (avoids timezone/DST day shifts). */
+function parseServiceDate_(s) {
+  var m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(String(s).trim());
+  if (!m) throw new Error("Invalid date of service: " + s);
+  var dt = new Date(+m[3], +m[1] - 1, +m[2], 12, 0, 0);
+  if (dt.getMonth() !== +m[1] - 1) throw new Error("Invalid date of service: " + s);
+  return dt;
+}
+
+/** The tab to copy: "R1 AM" or "R1 PM" (route code + space + run). Never modified. */
+function getTemplateSheet_(ss, route, session) {
+  var s = String(session || "").trim().toUpperCase();
+  if (s !== "AM" && s !== "PM") throw new Error("Choose AM or PM.");
+  var tabName = route.name + " " + s;
+  var sheet = ss.getSheetByName(tabName);
+  if (!sheet) throw new Error("No '" + tabName + "' tab found.");
+  return sheet;
+}
+
+/**
+ * Finds the rows by their labels in column A, so tabs whose rows are shifted
+ * (e.g. a tab with an extra title row) still work.
+ */
+function locateLayout_(sheet) {
+  var vals = sheet.getRange(1, 1, sheet.getMaxRows(), 1).getValues();
+  var L = {};
+  for (var i = 0; i < vals.length; i++) {
+    var raw = String(vals[i][0]).trim(), t = raw.toUpperCase(), row = i + 1;
+    if (!L.date && t.indexOf("DATE OF SERVICE") === 0) L.date = row;
+    else if (!L.license && t.indexOf("DRIVER") === 0 && t.indexOf("LICENSE") > -1) L.license = row;
+    else if (!L.header && t.indexOf("MTM TRIP NUMBER") === 0) L.header = row;
+    else if (L.header && !L.note && t.indexOf("EACH LEG") === 0) L.note = row;
+    else if (!L.sig && t.indexOf("DRIVER") === 0 && t.indexOf("SIGNATURE") > -1) {
+      L.sig = row; L.sigLabel = raw.split(":")[0] + ":";
+    } else if (!L.pname && t.indexOf("DRIVER") === 0 && t.indexOf("PRINTED NAME") > -1) {
+      L.pname = row; L.pnameLabel = raw.split(":")[0] + ":";
+    }
+  }
+  if (!L.date || !L.license || !L.header) {
+    throw new Error("Could not find the Date / License / header rows on tab '" + sheet.getName() + "'.");
+  }
+  L.firstTrip = L.header + 1;
+  L.lastTrip = L.note ? L.note - 1 : L.firstTrip;
+  if (L.lastTrip < L.firstTrip) L.lastTrip = L.firstTrip;
+  return L;
+}
+
+// ============================================================
+// FOLDER HIERARCHY HELPERS (Root -> Year -> Month -> Week -> Day)
+// ============================================================
+
+function getOrCreateYearFolder(rootFolder, date) {
+  var yearName = String(date.getFullYear());
+  var existing = rootFolder.getFoldersByName(yearName);
+  if (existing.hasNext()) {
+    return existing.next();
+  }
+  Logger.log("Creating year folder: " + yearName);
+  return rootFolder.createFolder(yearName);
+}
+
+function getOrCreateMonthFolder(yearFolder, date) {
+  var monthNames = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"
+  ];
+  var mm = String(date.getMonth() + 1).padStart(2, "0");
+  var monthName = mm + " - " + monthNames[date.getMonth()];
+
+  var existing = yearFolder.getFoldersByName(monthName);
+  if (existing.hasNext()) {
+    return existing.next();
+  }
+  Logger.log("Creating month folder: " + monthName + " inside " + yearFolder.getName());
+  return yearFolder.createFolder(monthName);
+}
+
+function getOrCreateWeekFolder(parentFolder, date) {
+  var weekStart = getWeekStart(date);
+  var weekEnd = new Date(weekStart);
+  weekEnd.setDate(weekEnd.getDate() + 6);
+
+  var folderName = formatDate(weekStart) + " to " + formatDate(weekEnd);
+
+  var existing = parentFolder.getFoldersByName(folderName);
+  if (existing.hasNext()) {
+    return existing.next();
+  }
+  Logger.log("Creating week folder: " + folderName + " inside " + parentFolder.getName());
+  return parentFolder.createFolder(folderName);
+}
+
+function getOrCreateDayFolder(weekFolder, date) {
+  var folderName = formatDate(date);
+  var existing = weekFolder.getFoldersByName(folderName);
+  if (existing.hasNext()) {
+    return existing.next();
+  }
+  Logger.log("Creating day folder: " + folderName + " inside " + weekFolder.getName());
+  return weekFolder.createFolder(folderName);
+}
+
+function getOrCreateSubfolder(parentFolder, folderName) {
+  var existing = parentFolder.getFoldersByName(folderName);
+  if (existing.hasNext()) {
+    return existing.next();
+  }
+  Logger.log("Creating folder: " + folderName + " inside " + parentFolder.getName());
+  return parentFolder.createFolder(folderName);
+}
+
+function getWeekStart(date) {
+  var d = new Date(date);
+  var day = d.getDay();
+  var diff = (day === 0) ? -6 : 1 - day;
+  d.setDate(d.getDate() + diff);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function formatDate(date) {
+  var mm = String(date.getMonth() + 1).padStart(2, "0");
+  var dd = String(date.getDate()).padStart(2, "0");
+  return mm + "-" + dd;
+}
+
+function formatDatePrefix(date) {
+  var yyyy = date.getFullYear();
+  var mm = String(date.getMonth() + 1).padStart(2, "0");
+  var dd = String(date.getDate()).padStart(2, "0");
+  return yyyy + "-" + mm + "-" + dd;
+}
+
+/**
+ * Counts the files directly inside a folder (not subfolders).
+ */
+function countFilesInFolder_(folder) {
+  var iterator = folder.getFiles();
+  var count = 0;
+  while (iterator.hasNext()) {
+    iterator.next();
+    count++;
+  }
+  return count;
+}
+
+// ============================================================
+// DAILY TRIP LOG ALERT SYSTEM (per route)
+//
+// Counts distinct AM / PM RUNS (not files) filed in today's Drive day folder
+// (Root -> Year -> Month -> Week -> Day):
+//   - Before PM_EXPECTED_AFTER_HOUR (3pm): expect the AM run
+//   - At/after it:                         expect the AM and PM runs
+//
+// Several drivers on one run still count as ONE run. Files that were not made
+// by the form (saved email attachments) cannot be tied to AM/PM, so each one
+// fills one missing slot.
+//
+// Run via TWO time-based triggers on weekdays:
+// Apps Script editor > Triggers > Add Trigger > checkDailyTripLogs
+//   1) Day timer > 12pm - 1pm window   (AM run should be in)
+//   2) Day timer > 7pm - 8pm window    (AM and PM runs should be in)
+// ============================================================
+function checkDailyTripLogs() {
+  var today = new Date();
+  var dayOfWeek = today.getDay(); // 0=Sun, 1=Mon, ... 6=Sat
+
+  if (dayOfWeek === 0 || dayOfWeek === 6) {
+    Logger.log("Weekend - no trip log check needed.");
+    return;
+  }
+
+  for (var h = 0; h < ROUTES.length; h++) {
+    checkDailyTripLogsForRoute_(ROUTES[h], today);
+  }
+}
+
+function checkDailyTripLogsForRoute_(route, today) {
+  var rootFolder = DriveApp.getFolderById(route.driveFolderId);
+  var yearFolder = getOrCreateYearFolder(rootFolder, today);
+  var monthFolder = getOrCreateMonthFolder(yearFolder, today);
+  var weekFolder = getOrCreateWeekFolder(monthFolder, today);
+  var dayFolder = getOrCreateDayFolder(weekFolder, today);
+
+  var isPastNoon = today.getHours() >= PM_EXPECTED_AFTER_HOUR;
+  var needed = isPastNoon ? ["AM", "PM"] : ["AM"];
+  var expectedCount = needed.length;
+  var milestoneLabel = isPastNoon ? "end-of-day" : "midday";
+  var check = evaluateRuns_(getRunsInFolder_(dayFolder, route.name), needed);
+  var actualCount = check.found;
+
+  var dayName = Utilities.formatDate(today, Session.getScriptTimeZone(), "EEEE");
+  var fullDateLabel = Utilities.formatDate(today, Session.getScriptTimeZone(), "EEEE, MMM d, yyyy");
+
+  Logger.log("[" + route.name + "] " + dayName + " (" + milestoneLabel + " check): " +
+    actualCount + " run(s) found in " + dayFolder.getName() + ", " + expectedCount + " expected.");
+
+  var subject, message;
+  if (actualCount >= expectedCount) {
+    subject = "[" + route.name + "] Trip Logs - Good Job! - " + fullDateLabel;
+    message = "Good job! All trip logs are in for the " + milestoneLabel + " check on " + dayName +
+      " (" + actualCount + " of " + expectedCount + " expected).\n\nRoute: " + route.name;
+  } else {
+    subject = "[" + route.name + "] Missing Trip Logs - " + fullDateLabel;
+    message = "Missing Trip Logs: the " + check.missing.join(" and ") + " run is missing for the " + milestoneLabel +
+      " check on " + dayName + " (" + actualCount + " of " + expectedCount + " expected).\n\nRoute: " + route.name;
+  }
+
+  Logger.log(message);
+
+  // Save this report so the morning trigger can resend the exact same message
+  PropertiesService.getScriptProperties().setProperty(
+    "lastTripLogReport_" + route.name,
+    JSON.stringify({ subject: subject, message: message, forDate: formatDate(today) })
+  );
+
+  sendTripLogEmail(route, subject, message);
+}
+
+/**
+ * Resends the previous evening's report as-is, first thing in the
+ * morning, as a reminder, for every route. Does not recalculate anything.
+ *
+ * Run via a time-based trigger early morning on weekdays:
+ * Apps Script editor > Triggers > Add Trigger > resendMorningTripLogReport
+ * > Time-driven > Day timer > 6am - 7am window.
+ */
+function resendMorningTripLogReport() {
+  var today = new Date();
+  var dayOfWeek = today.getDay();
+
+  if (dayOfWeek === 0 || dayOfWeek === 6) {
+    Logger.log("Weekend - no morning resend needed.");
+    return;
+  }
+
+  for (var h = 0; h < ROUTES.length; h++) {
+    resendMorningReportForRoute_(ROUTES[h]);
+  }
+}
+
+function resendMorningReportForRoute_(route) {
+  var stored = PropertiesService.getScriptProperties().getProperty("lastTripLogReport_" + route.name);
+  if (!stored) {
+    Logger.log("[" + route.name + "] No stored report found to resend.");
+    return;
+  }
+
+  var report = JSON.parse(stored);
+  Logger.log("[" + route.name + "] Resending morning report from " + report.forDate + ": " + report.message);
+  sendTripLogEmail(route, "[Reminder] " + report.subject, report.message);
+}
+
+/**
+ * Sends an email for a given route as a brand-new message every time, so
+ * Gmail treats each one as its own item instead of threading them together.
+ * Always goes to ALERT_RECIPIENTS.
+ */
+function sendTripLogEmail(route, subject, message) {
+  GmailApp.sendEmail(ALERT_RECIPIENTS, subject, message);
+  Logger.log("[" + route.name + "] Sent email: " + subject);
+}
+
+// ============================================================
+// END-OF-WEEK REPORT (all routes, one email)
+//
+// Counts the distinct AM/PM runs filed for each route across the whole week
+// (Mon-Sun), using each day's Drive folder, and emails ONE summary to
+// ALERT_RECIPIENTS.
+// Each route is shown as total / 10 (LOGS_PER_DAY x 5 weekdays).
+//
+// Run via a time-based trigger on Fridays, after the 7pm daily check:
+// Apps Script editor > Triggers > Add Trigger > sendWeeklyTripLogReport
+// > Time-driven > Week timer > Every Friday > 8pm - 9pm.
+//
+// It only looks; it never creates folders. Runs are counted under the
+// date of service, so a late submission for an earlier day in the week
+// is included if it was filed before the report runs.
+// ============================================================
+function sendWeeklyTripLogReport() {
+  var today = new Date();
+  var weekStart = getWeekStart(today);
+  var weekEnd = new Date(weekStart);
+  weekEnd.setDate(weekEnd.getDate() + 6);
+
+  var tz = Session.getScriptTimeZone();
+  var expectedPerRoute = LOGS_PER_DAY * 5;
+  var lines = [];
+
+  for (var h = 0; h < ROUTES.length; h++) {
+    var route = ROUTES[h];
+    var root = DriveApp.getFolderById(route.driveFolderId);
+    var total = 0;
+
+    for (var i = 0; i < 7; i++) {
+      var day = new Date(weekStart);
+      day.setDate(day.getDate() + i);
+      var folder = getExistingDayFolder_(root, day);
+      total += evaluateRuns_(getRunsInFolder_(folder, route.name), ["AM", "PM"]).found;
+    }
+
+    lines.push(route.name + ": " + total + " / " + expectedPerRoute);
+    Logger.log("[" + route.name + "] Week total: " + total);
+  }
+
+  var rangeLabel = formatDate(weekStart) + " to " + formatDate(weekEnd);
+  var subject = "Weekly Trip Log Report - Week of " + rangeLabel + ", " + Utilities.formatDate(weekStart, tz, "yyyy");
+  var message = "Weekly Trip Log Report\nWeek of " + rangeLabel + "\n\n" +
+    lines.join("\n");
+
+  Logger.log(message);
+  GmailApp.sendEmail(ALERT_RECIPIENTS, subject, message);
+}
+
+/** Finds the Drive folder for a given date without creating anything. Returns null if it doesn't exist. */
+function getExistingDayFolder_(rootFolder, date) {
+  var monthNames = ["January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"];
+  var weekStart = getWeekStart(date);
+  var weekEnd = new Date(weekStart);
+  weekEnd.setDate(weekEnd.getDate() + 6);
+
+  var names = [
+    String(date.getFullYear()),
+    String(date.getMonth() + 1).padStart(2, "0") + " - " + monthNames[date.getMonth()],
+    formatDate(weekStart) + " to " + formatDate(weekEnd),
+    formatDate(date)
+  ];
+
+  var folder = rootFolder;
+  for (var i = 0; i < names.length; i++) {
+    var it = folder.getFoldersByName(names[i]);
+    if (!it.hasNext()) return null;
+    folder = it.next();
+  }
+  return folder;
+}

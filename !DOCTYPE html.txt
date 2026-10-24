@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MTM Trip Log</title>
+<style>
+  :root { --ink:#1d2b2a; --muted:#5d6e6c; --paper:#f3f6f5; --card:#fff; --line:#c9d6d3; --accent:#0f6b61; --bad:#b3261e; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--paper); color:var(--ink); font:16px/1.45 "Segoe UI", system-ui, sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:1.6rem; margin:0 0 4px; text-align:center; }
+  .sub { color:var(--muted); margin:0 0 20px; text-align:center; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:18px; margin-bottom:18px; }
+  h2 { font-size:1.05rem; margin:0 0 14px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:14px 18px; }
+  @media (max-width:640px) { .grid { grid-template-columns:1fr; } }
+  label { display:block; font-weight:600; font-size:.9rem; margin-bottom:4px; }
+  input, select { width:100%; padding:10px; font:inherit; border:1px solid var(--line); border-radius:4px; background:#fff; }
+  input:focus, select:focus, button:focus-visible { outline:3px solid #7fc4bb; outline-offset:1px; }
+  input:invalid:not(:placeholder-shown), select:invalid.touched, input.touched:invalid { border-color:var(--bad); }
+  .hint { font-size:.8rem; color:var(--muted); margin-top:3px; }
+  .empty { color:var(--muted); font-size:.9rem; margin:0; }
+  button { font:inherit; font-weight:600; border-radius:4px; padding:10px 16px; cursor:pointer; border:1px solid var(--accent); }
+  .submit { background:var(--accent); color:#fff; width:100%; padding:14px; font-size:1.05rem; }
+  .submit:disabled { background:#9db5b1; border-color:#9db5b1; cursor:not-allowed; }
+  .cert { font-size:.85rem; color:var(--muted); margin:0 0 14px; }
+  .msg { margin-top:12px; padding:12px; border-radius:4px; display:none; }
+  .msg.ok { display:block; background:#e1f3ef; color:#0b4d45; }
+  .msg.err { display:block; background:#fbe6e4; color:var(--bad); }
+  .status { text-align:center; color:var(--muted); font-size:.85rem; margin-top:8px; }
+  .hidden { display:none !important; }
+  /* Driver's license help */
+  .count { font-size:.9rem; font-weight:700; margin-top:4px; color:var(--muted); }
+  .count.good { color:#1e7a3c; }
+  .lichelp { grid-column:1 / -1; background:#eef7f5; border-left:5px solid var(--accent); border-radius:4px; padding:12px 14px; }
+  .lichelp summary { cursor:pointer; font-weight:700; font-size:1.05rem; }
+  .lichelp h3 { font-size:1rem; margin:16px 0 6px; }
+  .lichelp p, .lichelp li { font-size:1rem; line-height:1.55; }
+  .lichelp ol, .lichelp ul { margin:6px 0 6px 22px; padding:0; }
+  .lichelp li { margin-bottom:6px; }
+  .lichelp svg { display:block; width:100%; max-width:420px; height:auto; margin:10px 0; }
+  .lichelp .warnbox { background:#fff6e0; border-left:5px solid #c98a00; border-radius:4px; padding:10px 12px; margin:10px 0; }
+  .driverbar { grid-column:1 / -1; display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; background:#e1f3ef; border-left:5px solid var(--accent); border-radius:4px; padding:10px 14px; }
+  .topwarn { background:#fff6e0; border-left:5px solid #c98a00; border-radius:4px; padding:14px; margin:0 0 18px; font-size:1rem; }
+  .keepopen { margin-top:12px; background:#fff6e0; border-left:5px solid #c98a00; border-radius:4px; padding:14px; font-size:1rem; }
+  /* Chooser */
+  .choose { text-align:center; padding:28px 18px; }
+  .choose h2 { font-size:1.3rem; margin-bottom:20px; }
+  .choices { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width:640px) { .choices { grid-template-columns:1fr; } }
+  .choice { background:var(--accent); color:#fff; padding:28px 16px; font-size:1.2rem; }
+  .choice:hover { background:#0b564e; }
+  .back { background:#fff; color:var(--accent); margin-bottom:14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>MTM, Inc. Daily Trip Log</h1>
+  <p class="sub">Diversity Residential Homes &middot; Vendor Code 1I7M</p>
+
+  <!-- CHOOSER -->
+  <section class="choose" id="chooser">
+    <h2>Are you picking up or dropping off an individual?</h2>
+    <div class="choices">
+      <button type="button" class="choice" id="choosePick">Picking Up</button>
+      <button type="button" class="choice" id="chooseDrop">Dropping Off</button>
+    </div>
+  </section>
+
+  <!-- PICK-UP FORM -->
+  <div id="pickWrap" class="hidden">
+    <button type="button" class="back" data-back>&larr; Change selection</button>
+    <p class="sub"><strong>Pick-Up</strong> &mdash; Required fields are marked by the Submit button staying disabled.</p>
+
+    <div class="topwarn" role="note">
+      <strong>Before you start:</strong> Pick the correct <strong>AM or PM</strong> for the run, because that decides which trip log the pick-up is filed in and which individuals are listed.
+      After your first pick-up your driver's license is remembered on this page only, so <strong>keep this page open</strong> between pick-ups.
+      If you close or refresh it, you will need to enter your license number again.
+    </div>
+
+    <form id="fPick" novalidate>
+      <section>
+        <h2>Trip details</h2>
+        <div class="grid">
+          <div><label for="p_route">Route</label>
+            <select id="p_route" data-f="route" required><option value="">Select a route</option></select></div>
+          <div><label for="p_serviceDate">Date of service</label>
+            <input id="p_serviceDate" data-f="serviceDate" type="date" required></div>
+          <div><label for="p_ampm">AM or PM run</label>
+            <select id="p_ampm" data-f="ampm" required><option value="">Select</option><option>AM</option><option>PM</option></select></div>
+          <div id="licField"><label for="p_license">Driver's license number</label>
+            <input id="p_license" data-f="license" autocomplete="off" required minlength="9" maxlength="9" pattern="[A-Za-z][0-9]{8}"
+                   title="1 letter followed by 8 numbers (9 characters total)">
+            <div class="count" id="licCount" aria-live="polite">0 of 9 characters typed</div>
+            <div class="hint">Type 1 letter followed by 8 numbers. Spaces and dashes are removed for you.</div></div>
+
+          <div id="licSaved" class="driverbar hidden">
+            <span>Driver's license on file: <strong id="licMasked"></strong></span>
+            <button type="button" id="licSwitch">Not you? Change driver</button>
+          </div>
+
+          <div class="lichelp" id="licHelp">
+            <details>
+              <summary>Not sure where to find the driver's license number? Tap here for help</summary>
+
+              <h3>What is it?</h3>
+              <p>It is the long number printed on the driver's <strong>license card</strong> (the plastic ID card the driver carries in a wallet).
+                 It is the number that belongs to <strong>that driver only</strong>. This form needs <strong>exactly 9 characters: 1 letter followed by 8 numbers</strong>.</p>
+
+              <h3>Where do I find it?</h3>
+              <svg viewBox="0 0 420 250" role="img" aria-label="Example drawing of the front of a driver's license with the license number line highlighted">
+                <rect x="4" y="4" width="412" height="242" rx="14" fill="#fff" stroke="#1d2b2a" stroke-width="3"/>
+                <rect x="4" y="4" width="412" height="40" rx="14" fill="#0f6b61"/>
+                <text x="210" y="31" text-anchor="middle" font-size="20" font-weight="700" fill="#fff" font-family="Segoe UI, sans-serif">DRIVER'S LICENSE</text>
+                <rect x="22" y="62" width="100" height="125" rx="6" fill="#d6e6e3" stroke="#5d6e6c" stroke-width="2"/>
+                <circle cx="72" cy="106" r="20" fill="#9db5b1"/>
+                <path d="M38 180 Q72 128 106 180 Z" fill="#9db5b1"/>
+                <text x="72" y="204" text-anchor="middle" font-size="12" fill="#5d6e6c" font-family="Segoe UI, sans-serif">PHOTO</text>
+                <rect x="138" y="58" width="266" height="38" rx="6" fill="#fff3b0" stroke="#b3261e" stroke-width="4"/>
+                <text x="146" y="74" font-size="11" fill="#5d6e6c" font-family="Segoe UI, sans-serif">LICENSE NO. / DL / DLN</text>
+                <text x="146" y="91" font-size="18" font-weight="700" fill="#1d2b2a" font-family="Consolas, monospace" letter-spacing="2">A 1 2 3 4 5 6 7 8</text>
+                <text x="138" y="124" font-size="13" fill="#5d6e6c" font-family="Segoe UI, sans-serif">NAME: (driver's name)</text>
+                <text x="138" y="148" font-size="13" fill="#5d6e6c" font-family="Segoe UI, sans-serif">ADDRESS: (driver's address)</text>
+                <text x="138" y="172" font-size="13" fill="#5d6e6c" font-family="Segoe UI, sans-serif">BIRTH DATE &middot; EXPIRES</text>
+                <text x="210" y="238" text-anchor="middle" font-size="11" fill="#b3261e" font-weight="700" font-family="Segoe UI, sans-serif">EXAMPLE ONLY - every state's card looks a little different</text>
+              </svg>
+              <ol>
+                <li>Take the driver's license <strong>card</strong> out of the wallet and look at the <strong>front</strong> (the side with the driver's photo).</li>
+                <li>Look near the <strong>top</strong>, or right next to or under the <strong>photo</strong>. Find a label that says
+                    <strong>"LICENSE NO."</strong>, <strong>"LIC NO."</strong>, <strong>"DL"</strong>, <strong>"DLN"</strong>, or sometimes just the number <strong>"4d"</strong> in front of it.</li>
+                <li>The number printed next to that label is the one you need. It should be <strong>1 letter followed by 8 numbers</strong>, and some cards print it with dashes or spaces.</li>
+                <li>Type it into the box above. <strong>Leave out any dashes or spaces</strong> (the box removes them for you). The letter can be capital or small.</li>
+                <li>Watch the counter under the box. When it says <strong>"9 of 9 characters"</strong> in green, you are done.</li>
+              </ol>
+
+              <div class="warnbox">
+                <strong>Careful - do NOT use these:</strong>
+                <ul>
+                  <li>The <strong>birth date</strong> or the <strong>expiration date</strong>.</li>
+                  <li>The <strong>"Document", "Audit", "Control" or "Discriminator"</strong> number (often on the back or in tiny print). That is a different number.</li>
+                  <li>A <strong>Social Security number</strong>, or the van's license plate or VIN.</li>
+                </ul>
+              </div>
+
+              <h3>Common problems</h3>
+              <ul>
+                <li><strong>"My counter says fewer than 9."</strong> Look again for a missing letter or number at the start or end. The form will not submit until all 9 are typed.</li>
+                <li><strong>"My counter says more than 9."</strong> You probably typed a different number, or typed something extra. The box stops at 9.</li>
+                <li><strong>Is it a zero or the letter O?</strong> Only the first character can be a letter, so the other 8 are numbers (zeros). If you cannot tell, ask the driver or check the card in better light.</li>
+                <li><strong>The driver does not have the card with them?</strong> Do not guess. Ask the driver, or ask your supervisor before submitting.</li>
+              </ul>
+            </details>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Individual picking up</h2>
+        <div data-f="people"><p class="empty">Select a route and AM/PM to see its individuals.</p></div>
+      </section>
+
+      <section>
+        <h2>Pick-up</h2>
+        <div class="grid">
+          <div><label for="p_pickup">Pick Up Time</label><input id="p_pickup" data-f="pickup" type="time" required></div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Driver certification</h2>
+        <p class="cert">I certify that all information contained herein is true and accurate, and understand that this statement is made subject to the applicable penalties under federal and state law for making false declarations.</p>
+        <div class="grid">
+          <div><label for="p_driverSignature">Driver's signature (type full name)</label>
+            <input id="p_driverSignature" data-f="driverSignature" autocomplete="off" required></div>
+          <div><label for="p_driverName">Driver's printed name</label>
+            <input id="p_driverName" data-f="driverName" autocomplete="off" required></div>
+        </div>
+      </section>
+
+      <button type="submit" class="submit" data-f="submit" disabled>Submit pick-up log</button>
+      <div class="status" data-f="status">Complete every required field to enable submit.</div>
+      <div class="msg" data-f="msg" role="status"></div>
+      <div class="keepopen hidden" id="keepOpen" role="alert">
+        <strong>Keep this page open!</strong> Your driver's license number is now saved on this page,
+        so you won't need to type it again for your next pick-up. If you close or refresh this page,
+        you will have to enter it again.
+      </div>
+    </form>
+  </div>
+
+  <!-- DROP-OFF FORM -->
+  <div id="dropWrap" class="hidden">
+    <button type="button" class="back" data-back>&larr; Change selection</button>
+    <p class="sub"><strong>Drop-Off</strong> &mdash; Every field is required.</p>
+
+    <form id="fDrop" novalidate>
+      <section>
+        <h2>Trip details</h2>
+        <div class="grid">
+          <div><label for="d_route">Route</label>
+            <select id="d_route" data-f="route" required><option value="">Select a route</option></select></div>
+          <div><label for="d_serviceDate">Date of service</label>
+            <input id="d_serviceDate" data-f="serviceDate" type="date" required></div>
+          <div><label for="d_session">AM or PM run</label>
+            <select id="d_session" data-f="session" required><option value="">Select</option><option>AM</option><option>PM</option></select></div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Individual dropped off</h2>
+        <div data-f="people"><p class="empty">Select a route and AM/PM to see its individuals.</p></div>
+      </section>
+
+      <section>
+        <h2>Drop-off</h2>
+        <p class="cert">A signature is required for the transport.</p>
+        <div class="grid">
+          <div><label for="d_dropoff">Drop-off time</label><input id="d_dropoff" data-f="dropoff" type="time" required></div>
+          <div><label for="d_signature">Member / facility / attendant signature (type full name)</label>
+            <input id="d_signature" data-f="signature" autocomplete="off" required></div>
+        </div>
+      </section>
+
+      <button type="submit" class="submit" data-f="submit" disabled>Submit drop-off log</button>
+      <div class="status" data-f="status">Complete every field to enable submit.</div>
+      <div class="msg" data-f="msg" role="status"></div>
+    </form>
+  </div>
+</main>
+
+<script>
+  var $ = function (s) { return document.querySelector(s); };
+
+  function to12h(v) {
+    if (!v) return v;
+    var p = v.split(":"), h = +p[0], ap = h >= 12 ? "PM" : "AM";
+    return ((h % 12) || 12) + ":" + p[1] + " " + ap;
+  }
+  function toSheetDate(v) { var p = v.split("-"); return p[1] + "/" + p[2] + "/" + p[0]; }
+  function todayStr() {
+    var d = new Date(), m = ("0" + (d.getMonth() + 1)).slice(-2), day = ("0" + d.getDate()).slice(-2);
+    return d.getFullYear() + "-" + m + "-" + day;
+  }
+
+  /* Builds all behavior for one form.
+     cfg: { form, prefix, sessionField, buttonText, successText, waitText, serverFn, buildPayload(get, people) }
+     sessionField is the data-f name of the AM/PM select ("ampm" on pick-up, "session" on drop-off).
+     The individuals list depends on BOTH the route and the AM/PM run. */
+  function setupForm(cfg) {
+    var form = cfg.form;
+    var f = function (name) { return form.querySelector('[data-f="' + name + '"]'); };
+    var peopleEl = f("people"), submitBtn = f("submit"), statusEl = f("status"), msgEl = f("msg");
+    var rosterBlocked = false, rosterReq = 0;
+
+    function selectedPeople() {
+      var sel = form.querySelector(".individual");
+      return sel && sel.value ? [sel.value] : [];
+    }
+
+    function refresh() {
+      var ok = form.checkValidity() && !rosterBlocked;
+      submitBtn.disabled = !ok;
+      statusEl.textContent = ok ? "Ready to submit." : cfg.waitText;
+    }
+
+    function renderPeople() {
+      var code = f("route").value, session = f(cfg.sessionField).value, req = ++rosterReq;
+      peopleEl.innerHTML = "";
+      if (!code || !session) {
+        rosterBlocked = false;
+        peopleEl.innerHTML = '<p class="empty">Select a route and AM/PM to see its individuals.</p>';
+        refresh();
+        return;
+      }
+      rosterBlocked = true;
+      peopleEl.innerHTML = '<p class="empty">Loading individuals...</p>';
+      refresh();
+      google.script.run
+        .withSuccessHandler(function (names) {
+          if (req !== rosterReq) return;
+          rosterBlocked = false;
+          peopleEl.innerHTML = "";
+          if (!names || !names.length) {
+            peopleEl.innerHTML = '<p class="empty">No individuals are listed for this route and run yet.</p>';
+            refresh();
+            return;
+          }
+          var selId = cfg.prefix + "_individual";
+          var lab = document.createElement("label");
+          lab.setAttribute("for", selId);
+          lab.textContent = "Individual";
+          var sel = document.createElement("select");
+          sel.id = selId; sel.className = "individual"; sel.required = true;
+          var first = document.createElement("option");
+          first.value = ""; first.textContent = "Select an individual";
+          sel.appendChild(first);
+          names.forEach(function (n) {
+            var o = document.createElement("option");
+            o.value = n; o.textContent = n;
+            sel.appendChild(o);
+          });
+          peopleEl.appendChild(lab);
+          peopleEl.appendChild(sel);
+          refresh();
+        })
+        .withFailureHandler(function (err) {
+          if (req !== rosterReq) return;
+          peopleEl.innerHTML = '<p class="empty">Could not load individuals: ' +
+            (err && err.message ? err.message : err) + ' Pick the route or AM/PM again to retry.</p>';
+          refresh();
+        })
+        .getRouteMembers(code, session);
+    }
+
+    f("route").addEventListener("change", renderPeople);
+    f(cfg.sessionField).addEventListener("change", renderPeople);
+    form.addEventListener("input", refresh);
+    form.addEventListener("change", refresh);
+    form.addEventListener("focusout", function (e) { e.target.classList.add("touched"); });
+    if (cfg.onSetup) cfg.onSetup(f, refresh);
+
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      if (!form.checkValidity()) { form.reportValidity(); return; }
+      var payload = cfg.buildPayload(function (n) { return f(n).value; }, selectedPeople());
+      submitBtn.disabled = true; submitBtn.textContent = "Submitting..."; msgEl.className = "msg";
+      google.script.run
+        .withSuccessHandler(function (r) {
+          msgEl.className = "msg ok";
+          msgEl.textContent = cfg.successText + r.file + ".";
+          form.reset(); renderPeople();
+          f("serviceDate").value = todayStr();
+          if (cfg.onSuccess) cfg.onSuccess(payload);
+          submitBtn.textContent = cfg.buttonText; refresh();
+          window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+        })
+        .withFailureHandler(function (err) {
+          msgEl.className = "msg err";
+          msgEl.textContent = "Not submitted: " + (err && err.message ? err.message : err) + " Your entries are still here. Fix the problem and submit again.";
+          submitBtn.textContent = cfg.buttonText; refresh();
+        })[cfg.serverFn](payload);
+    });
+
+    f("serviceDate").value = todayStr();
+    return { f: f, refresh: refresh };
+  }
+
+  /* ---- Pick-up ---- */
+  var pick = setupForm({
+    form: $("#fPick"), prefix: "p", serverFn: "submitPickUp", sessionField: "ampm",
+    buttonText: "Submit pick-up log",
+    waitText: "Complete every required field to enable submit.",
+    successText: "Pick-up log submitted and filed as ",
+    onSuccess: function (payload) { lockLicense(payload.license); },
+    buildPayload: function (get, people) {
+      return {
+        route: get("route"),
+        serviceDate: toSheetDate(get("serviceDate")),
+        license: get("license").trim(),
+        individuals: people,
+        ampm: get("ampm"),
+        pickup: to12h(get("pickup")),
+        driverName: get("driverName").trim(),
+        driverSignature: get("driverSignature").trim()
+      };
+    }
+  });
+
+  /* Driver's license: strip spaces/dashes, capitalize, 1 letter then 8 numbers, 9-character counter.
+     After the first successful pick-up the number is kept in memory for this page only. */
+  var savedLicense = "";
+  var lic = $("#p_license"), licCountEl = $("#licCount");
+  function updateLicCount() {
+    var n = lic.value.length;
+    licCountEl.textContent = n === 9 ? "9 of 9 characters - looks good!" : n + " of 9 characters typed";
+    licCountEl.className = "count" + (n === 9 ? " good" : "");
+  }
+  lic.addEventListener("input", function () {
+    var raw = this.value.toUpperCase(), clean = "";
+    for (var i = 0; i < raw.length && clean.length < 9; i++) {
+      var ch = raw.charAt(i);
+      if (clean.length === 0) { if (/[A-Z]/.test(ch)) clean += ch; }
+      else if (/[0-9]/.test(ch)) clean += ch;
+    }
+    if (clean !== this.value) this.value = clean;
+    updateLicCount();
+  });
+  // form.reset() clears the box, so put the saved license back
+  $("#fPick").addEventListener("reset", function () {
+    setTimeout(function () {
+      if (savedLicense) lic.value = savedLicense;
+      updateLicCount();
+      pick.refresh();
+    }, 0);
+  });
+  function lockLicense(value) {
+    savedLicense = value;
+    $("#licMasked").textContent = "\u2022\u2022\u2022\u2022\u2022" + value.slice(-4);
+    $("#licField").classList.add("hidden");
+    $("#licHelp").classList.add("hidden");
+    $("#licSaved").classList.remove("hidden");
+    $("#keepOpen").classList.remove("hidden");
+    window.onbeforeunload = function (e) { e.preventDefault(); e.returnValue = ""; return ""; };
+  }
+  $("#licSwitch").addEventListener("click", function () {
+    savedLicense = ""; lic.value = "";
+    $("#licField").classList.remove("hidden");
+    $("#licHelp").classList.remove("hidden");
+    $("#licSaved").classList.add("hidden");
+    $("#keepOpen").classList.add("hidden");
+    window.onbeforeunload = null;
+    updateLicCount(); pick.refresh(); lic.focus();
+  });
+
+  /* ---- Drop-off ---- */
+  var drop = setupForm({
+    form: $("#fDrop"), prefix: "d", serverFn: "submitDropOff", sessionField: "session",
+    buttonText: "Submit drop-off log",
+    waitText: "Complete every field to enable submit.",
+    successText: "Drop-off log submitted and filed as ",
+    buildPayload: function (get, people) {
+      return {
+        route: get("route"),
+        serviceDate: toSheetDate(get("serviceDate")),
+        individuals: people,
+        dropoff: to12h(get("dropoff")),
+        session: get("session"),
+        signature: get("signature").trim()
+      };
+    }
+  });
+
+  /* ---- Chooser / navigation ---- */
+  function show(which) {
+    $("#chooser").classList.toggle("hidden", which !== "choose");
+    $("#pickWrap").classList.toggle("hidden", which !== "pick");
+    $("#dropWrap").classList.toggle("hidden", which !== "drop");
+    window.scrollTo(0, 0);
+  }
+  $("#choosePick").addEventListener("click", function () { show("pick"); });
+  $("#chooseDrop").addEventListener("click", function () { show("drop"); });
+  Array.prototype.forEach.call(document.querySelectorAll("[data-back]"), function (b) {
+    b.addEventListener("click", function () { show("choose"); });
+  });
+
+  /* ---- Load routes once for both forms ---- */
+  google.script.run.withSuccessHandler(function (routes) {
+    [pick, drop].forEach(function (x) {
+      var sel = x.f("route");
+      routes.forEach(function (h) {
+        var o = document.createElement("option"); o.value = h.code; o.textContent = h.label; sel.appendChild(o);
+      });
+      x.refresh();
+    });
+  }).getRouteList();
+</script>
+</body>
+</html>
